@@ -1,6 +1,8 @@
 #ifndef CCNY_RGBD_RGBD_KEYFRAME_H
 #define CCNY_RGBD_RGBD_KEYFRAME_H
 
+#include <vector>
+#include <queue>
 #include <boost/filesystem.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl_ros/point_cloud.h>
@@ -36,6 +38,7 @@ class RGBDKeyframe: public RGBDFrame
 
 typedef Eigen::aligned_allocator<RGBDKeyframe> KeyframeAllocator;
 typedef std::vector<RGBDKeyframe, KeyframeAllocator> KeyframeVector;
+typedef std::queue<RGBDKeyframe> KeyframeQueue;
 
 bool saveKeyframe(
   const RGBDKeyframe& keyframe, 

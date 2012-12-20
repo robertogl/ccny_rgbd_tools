@@ -4,11 +4,23 @@ namespace ccny_rgbd
 {
 
 KeyframeMapper::KeyframeMapper(ros::NodeHandle nh, ros::NodeHandle nh_private):
-  KeyframeGenerator(nh, nh_private)
+  nh_(nh), 
+  nh_private_(nh_private),
+  n_keyframes_added_(0),
+  manual_add_(false)
 {
   ROS_INFO("Starting RGBD Keyframe Mapper");
 
-  // **** init variables
+  // **** parameters
+
+  if (!nh_private_.getParam ("fixed_frame", fixed_frame_))
+    fixed_frame_ = "/odom";
+  if (!nh_private_.getParam ("kf/kf_dist_eps", kf_dist_eps_))
+    kf_dist_eps_  = 0.10;
+  if (!nh_private_.getParam ("kf/kf_angle_eps", kf_angle_eps_))
+    kf_angle_eps_  = 10.0 * M_PI / 180.0;
+
+  // **** init params
 
   keyframes_pub_ = nh_.advertise<PointCloudT>(
     "keyframes", 1);
@@ -17,8 +29,12 @@ KeyframeMapper::KeyframeMapper(ros::NodeHandle nh, ros::NodeHandle nh_private):
   edges_pub_ = nh_.advertise<visualization_msgs::Marker>( 
     "keyframe_edges", 1);
 
+  process_queue_thread_ = boost::thread(&KeyframeMapper::processQueueLoop, this);  
+
   // **** services
 
+  add_manual_keyframe_service_ = nh_.advertiseService(
+    "add_manual_keyframe", &KeyframeMapper::addManualKeyframeSrvCallback, this);
   pub_frame_service_ = nh_.advertiseService(
     "publish_keyframe", &KeyframeMapper::publishKeyframeSrvCallback, this);
   pub_frames_service_ = nh_.advertiseService(
@@ -54,6 +70,37 @@ KeyframeMapper::~KeyframeMapper()
 
 }
 
+
+void KeyframeMapper::processQueueLoop()
+{
+  ros::Rate r(20);
+  
+  while(true)
+  {
+    processQueue(); 
+    r.sleep();
+  }
+}
+
+void KeyframeMapper::processQueue()
+{
+  queue_mutex_.lock();
+  keyframes_mutex_.lock();
+
+  if (!keyframe_queue_.empty())
+  {
+    printf("[-] transferring frame, queue size is %d\n", 
+      (int)keyframe_queue_.size());
+
+    keyframes_.push_back(keyframe_queue_.front());
+    keyframe_queue_.pop();
+    publishKeyframeData(keyframes_.size() - 1);
+  }
+
+  keyframes_mutex_.unlock();
+  queue_mutex_.unlock();
+}
+
 void KeyframeMapper::RGBDCallback(
   const ImageMsg::ConstPtr& depth_msg,
   const ImageMsg::ConstPtr& rgb_msg,
@@ -65,7 +112,7 @@ void KeyframeMapper::RGBDCallback(
 
   try{
     tf_listener_.waitForTransform(
-     fixed_frame_, rgb_msg->header.frame_id, time, ros::Duration(0.1));
+      fixed_frame_, rgb_msg->header.frame_id, time, ros::Duration(0.1));
     tf_listener_.lookupTransform(
       fixed_frame_, rgb_msg->header.frame_id, time, transform);  
   }
@@ -73,18 +120,91 @@ void KeyframeMapper::RGBDCallback(
   {
     return;
   }
+
+  // create a new frame, and check whether we need to add a keyframe
   RGBDFrame frame(rgb_msg, depth_msg, info_msg);
-  bool result = KeyframeGenerator::processFrame(frame, transform);
-  if (result) publishKeyframeData(keyframes_.size() - 1);
+
+  if (newKeyframeNeeded(transform))
+    addKeyframe(frame, transform);
+
+  //if (result) publishKeyframeData(keyframes_.size() - 1);
 }
+
+bool KeyframeMapper::processFrame(
+  const RGBDFrame& frame, 
+  const tf::Transform& pose)
+{
+  if (newKeyframeNeeded(pose))
+  {
+    addKeyframe(frame, pose);
+    return true;
+  }
+  else return false;
+}
+
+bool KeyframeMapper::newKeyframeNeeded(const tf::Transform& pose)
+{
+  bool result;
+
+  keyframes_mutex_.lock();
+
+  if(n_keyframes_added_ == 0)
+    result = true;
+  else if (manual_add_)
+    result = true;
+  else
+  {
+    double dist, angle;
+    getTfDifference(pose, last_keyframe_pose_, dist, angle);
+
+    if (dist > kf_dist_eps_ || angle > kf_angle_eps_)
+      result = true;
+    else 
+      result = false;
+  }
+  
+  keyframes_mutex_.unlock();
+
+  return result;
+}
+
+void KeyframeMapper::addKeyframe(
+  const RGBDFrame& frame, 
+  const tf::Transform& pose)
+{
+  RGBDKeyframe keyframe(frame);
+  keyframe.pose = pose;
+  keyframe.constructDensePointCloud();
+
+  if (manual_add_)
+  {
+    ROS_INFO("Adding frame manually");
+    manual_add_ = false;
+    keyframe.manually_added = true;
+  }
+
+  keyframes_mutex_.lock();  
+  n_keyframes_added_++;
+  last_keyframe_pose_ = pose;
+  keyframes_mutex_.unlock();
+
+  queue_mutex_.lock(); 
+  printf("[+] adding frame, queue size is %d\n", (int)keyframe_queue_.size());
+  keyframe_queue_.push(keyframe);
+  queue_mutex_.unlock(); 
+}
+
 
 bool KeyframeMapper::publishKeyframeSrvCallback(
   PublishKeyframe::Request& request,
   PublishKeyframe::Response& response)
 {
+  keyframes_mutex_.lock();
+
   if (request.id < 0 || request.id >= (int)keyframes_.size())
   {
     ROS_ERROR("request.id %d out of bounds (%d keyframes)", (int)request.id, (int)keyframes_.size());
+    keyframes_mutex_.unlock();    
     return false;
   }
 
@@ -99,6 +219,8 @@ bool KeyframeMapper::recolorSrvCallback(
   Recolor::Request&  request,
   Recolor::Response& response)
 {
+  keyframes_mutex_.lock();
+
   srand(time(NULL));
 
   for (unsigned int kf_idx = 0; kf_idx < keyframes_.size(); ++kf_idx)
@@ -120,6 +242,8 @@ bool KeyframeMapper::recolorSrvCallback(
     }
   }
 
+  keyframes_mutex_.unlock();
+
   return true;
 }
 
@@ -133,6 +257,8 @@ bool KeyframeMapper::publishAllKeyframesSrvCallback(
     return false;
   }
 
+  keyframes_mutex_.lock();
+
   for (int i = 0; i < (int)keyframes_.size(); i += request.step)
   {
     publishKeyframeData(i);
@@ -141,6 +267,8 @@ bool KeyframeMapper::publishAllKeyframesSrvCallback(
   }
 
   publishEdges();
+
+  keyframes_mutex_.unlock();
 
   return true;
 }
@@ -192,6 +320,8 @@ void KeyframeMapper::publishEdges()
 
 void KeyframeMapper::publishKeyframePose(int i)
 {
+  boost::mutex::scoped_lock(keyframes_mutex_);
+
   RGBDKeyframe& keyframe = keyframes_[i];
 
   // **** publish camera pose
@@ -263,6 +393,8 @@ bool KeyframeMapper::saveKeyframesSrvCallback(
   Save::Request& request,
   Save::Response& response)
 {
+  boost::mutex::scoped_lock(keyframes_mutex_);
+
   ROS_INFO("Saving keyframes...");
   std::string path = request.filename;
   return saveKeyframes(keyframes_, path);
@@ -272,6 +404,8 @@ bool KeyframeMapper::saveKeyframesFFSrvCallback(
   Save::Request& request,
   Save::Response& response)
 {
+  boost::mutex::scoped_lock(keyframes_mutex_);
+
   ROS_INFO("Saving keyframes (in fixed frame)...");
   std::string path = request.filename;
   return saveKeyframes(keyframes_, path, true);
@@ -281,6 +415,8 @@ bool KeyframeMapper::loadKeyframesSrvCallback(
   Load::Request& request,
   Load::Response& response)
 {
+  boost::mutex::scoped_lock(keyframes_mutex_);
+
   ROS_INFO("Loading keyframes...");
   std::string path = request.filename;
   return loadKeyframes(keyframes_, path);
@@ -290,6 +426,8 @@ bool KeyframeMapper::saveFullSrvCallback(
   Save::Request& request,
   Save::Response& response)
 {
+  boost::mutex::scoped_lock(keyframes_mutex_);
+
   ROS_INFO("Saving full map...");
   std::string path = request.filename;
   return saveFullMap(path);
@@ -326,6 +464,15 @@ bool KeyframeMapper::saveFullMap(const std::string& path)
   int result_pcd = writer.writeBinary<PointT>(path + ".pcd", full_map_f);  
 
   return result_pcd;
+}
+
+bool KeyframeMapper::addManualKeyframeSrvCallback(
+  AddManualKeyframe::Request& request,
+  AddManualKeyframe::Response& response)
+{
+  manual_add_ = true;
+
+  return true;
 }
 
 } // namespace ccny_rgbd

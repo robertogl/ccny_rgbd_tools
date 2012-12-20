@@ -9,8 +9,11 @@
 #include <tf/transform_listener.h>
 #include <visualization_msgs/Marker.h>
 
+#include "ccny_rgbd/types.h"
+#include "ccny_rgbd/structures/rgbd_frame.h"
 #include "ccny_rgbd/structures/rgbd_keyframe.h"
-#include "ccny_rgbd/mapping/keyframe_generator.h"
+
+#include "ccny_rgbd/AddManualKeyframe.h"
 #include "ccny_rgbd/PublishKeyframe.h"
 #include "ccny_rgbd/PublishAllKeyframes.h"
 #include "ccny_rgbd/Recolor.h"
@@ -20,12 +23,15 @@
 namespace ccny_rgbd
 {
 
-class KeyframeMapper: public KeyframeGenerator
+class KeyframeMapper
 {
   public:
 
     KeyframeMapper(ros::NodeHandle nh, ros::NodeHandle nh_private);
     virtual ~KeyframeMapper();
+
+    bool addManualKeyframeSrvCallback(AddManualKeyframe::Request& request,
+                                      AddManualKeyframe::Response& response);
 
     bool publishAllKeyframesSrvCallback(PublishAllKeyframes::Request& request,
                                         PublishAllKeyframes::Response& response);
@@ -55,6 +61,18 @@ class KeyframeMapper: public KeyframeGenerator
       const ImageMsg::ConstPtr& rgb_msg,
       const CameraInfoMsg::ConstPtr& info_msg);
 
+    ros::NodeHandle nh_;
+    ros::NodeHandle nh_private_;
+
+    KeyframeVector keyframes_;
+
+    KeyframeQueue keyframe_queue_;
+
+    boost::mutex queue_mutex_;
+    boost::mutex keyframes_mutex_;
+
+    std::string fixed_frame_;
+
   private:
 
     ros::Publisher keyframes_pub_;
@@ -67,6 +85,7 @@ class KeyframeMapper: public KeyframeGenerator
     ros::ServiceServer save_full_service_;
     ros::ServiceServer load_kf_service_;
     ros::ServiceServer save_kf_ff_service_;
+    ros::ServiceServer add_manual_keyframe_service_;
 
     tf::TransformListener tf_listener_;
 
@@ -77,6 +96,27 @@ class KeyframeMapper: public KeyframeGenerator
     ImageSubFilter      sub_depth_;
     ImageSubFilter      sub_rgb_;
     CameraInfoSubFilter sub_info_;
+
+    boost::thread process_queue_thread_;
+
+    int n_keyframes_added_;
+    tf::Transform last_keyframe_pose_;
+
+    bool manual_add_; // if true, next frame will be added as keyframe
+
+    double kf_dist_eps_;
+    double kf_angle_eps_;
+
+    void processQueueLoop();
+    void processQueue();
+
+    bool newKeyframeNeeded( const tf::Transform& pose);
+
+    bool processFrame(const RGBDFrame& frame, 
+                      const tf::Transform& pose);
+
+    void addKeyframe(const RGBDFrame& frame, 
+                     const tf::Transform& pose);
 
     void publishMatchEdge(int i, int j);
     void publishKeyframeData(int i);

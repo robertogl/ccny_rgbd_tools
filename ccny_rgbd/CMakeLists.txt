@@ -127,6 +127,24 @@ target_link_libraries (keyframe_loop_mapper_node
 )
 
 ################################################################
+# Build keyframe loop mapper RT application
+################################################################
+
+rosbuild_add_executable(keyframe_loop_mapper_rt_node 
+  src/node/keyframe_loop_mapper_rt_node.cpp
+  src/apps/keyframe_loop_mapper_rt.cpp
+  src/apps/keyframe_loop_mapper.cpp
+  src/apps/keyframe_mapper.cpp)
+
+target_link_libraries (keyframe_loop_mapper_rt_node
+  ccny_rgbd_structures 
+  ccny_rgbd_mapping
+  ccny_rgbd_util
+  boost_signals 
+  boost_system
+)
+
+################################################################
 # Build octree mapper application
 ################################################################
 
