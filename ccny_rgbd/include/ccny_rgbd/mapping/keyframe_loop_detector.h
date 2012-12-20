@@ -46,10 +46,21 @@ class KeyframeLoopDetector
     int max_ransac_iterations_;
 
     void prepareFeaturesForRANSAC(KeyframeVector& keyframes);
+ 
+    /* adds associations between consecutive frames
+     * in the path, using their relative poses
+     */
+    void createConsecutiveAssociations(
+      const KeyframeVector& keyframes,
+      KeyframeAssociationVector& associations);
 
     void treeAssociations(
       KeyframeVector& keyframes,
       KeyframeAssociationVector& associations);
+
+    void createDescriptorMatcherFLANN(
+      const KeyframeVector& keyframes,
+      cv::FlannBasedMatcher& matcher);
     
     void simplifiedRingAssociations(  
       KeyframeVector& keyframes,
